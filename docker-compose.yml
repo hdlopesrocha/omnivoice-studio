@@ -1,0 +1,62 @@
+name: omnivoice-studio
+
+services:
+  engine:
+    build:
+      context: ./engine
+      args:
+        TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
+        TORCH_VERSION: ${TORCH_VERSION:-2.8.0}
+    image: ${ENGINE_IMAGE:-omnivoice-studio-engine:cpu}
+    init: true
+    restart: unless-stopped
+    environment:
+      DEVICE: ${DEVICE:-auto}
+      OMNIVOICE_MODEL: ${OMNIVOICE_MODEL:-k2-fsa/OmniVoice}
+      OMNIVOICE_ASR_MODEL: ${OMNIVOICE_ASR_MODEL:-openai/whisper-large-v3-turbo}
+      OMNIVOICE_ASR_DEVICE: ${OMNIVOICE_ASR_DEVICE:-}
+      OMNIVOICE_LOAD_ASR: ${OMNIVOICE_LOAD_ASR:-0}
+      OMNIVOICE_PREVIEW_TEXT: ${OMNIVOICE_PREVIEW_TEXT:-Hello! This is a preview of my trained voice.}
+      DATA_DIR: /data
+      HF_HOME: /data/hf
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+      HF_TOKEN: ${HF_TOKEN:-}
+      CORS_ORIGINS: "${CORS_ORIGINS:-*}"
+      MAX_INPUT_CHARS: ${MAX_INPUT_CHARS:-8000}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+      MIN_VOICE_SECONDS: ${MIN_VOICE_SECONDS:-1}
+      MAX_VOICE_SECONDS: ${MAX_VOICE_SECONDS:-30}
+      MAX_QUEUE_SIZE: ${MAX_QUEUE_SIZE:-50}
+      MAX_JOB_HISTORY: ${MAX_JOB_HISTORY:-200}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${ENGINE_PORT:-8000}:8000"
+    volumes:
+      - omnivoice-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+
+  web:
+    build:
+      context: ./web
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+    image: ${WEB_IMAGE:-omnivoice-studio-web:latest}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${WEB_PORT:-8088}:80"
+    depends_on:
+      engine:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  omnivoice-data:

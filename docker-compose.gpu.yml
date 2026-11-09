@@ -1,0 +1,15 @@
+services:
+  engine:
+    image: omnivoice-studio-engine:gpu
+    build:
+      args:
+        TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}
+    environment:
+      DEVICE: cuda:0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

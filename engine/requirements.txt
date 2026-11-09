@@ -1,0 +1,11 @@
+# OmniVoice 0.2.1 is developed against this upstream dependency set.
+omnivoice==0.2.1
+transformers==5.3.0
+gradio==6.9.0
+numpy==2.2.6
+soundfile==0.13.1
+
+# API server. Kept semver-broad so it can pick up compatible fixes.
+fastapi>=0.115.2,<1
+uvicorn[standard]>=0.30,<1
+python-multipart>=0.0.9
