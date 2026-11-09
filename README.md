@@ -48,7 +48,7 @@ leaving your Docker volume.
 ## Quick start
 
 ```bash
-git clone https://github.com/your-name/omnivoice-studio.git
+git clone https://github.com/hdlopesrocha/omnivoice-studio.git
 cd omnivoice-studio
 
 make up        # builds the CPU or GPU stack automatically
