@@ -16,6 +16,8 @@ export interface Health {
   voices: number
   outputs: number
   jobs: number
+  lora_adapter: string | null
+  flashinfer: boolean
   version: string
 }
 
@@ -31,6 +33,10 @@ export interface Info {
   max_voice_seconds: number
   max_queue_size: number
   max_job_history: number
+  max_import_mb: number
+  lora_adapter: string | null
+  flashinfer: boolean
+  normalize_text: boolean
   formats: AudioFormat[]
   modes: TTSMode[]
   preview_text: string
@@ -78,6 +84,7 @@ export interface OutputMeta {
   duration_seconds: number
   generation_seconds: number
   rtf: number | null
+  seed?: number | null
   created_at: string
   size_bytes: number
 }
@@ -87,11 +94,25 @@ export interface TTSRequest {
   mode: TTSMode
   voice_id?: string | null
   instruct?: string | null
+  style_instruct?: string | null
   language?: string | null
   language_variant?: string | null
   speed?: number | null
+  duration?: number | null
   num_step?: number
   guidance_scale?: number
+  denoise?: boolean
+  t_shift?: number
+  position_temperature?: number
+  class_temperature?: number
+  layer_penalty_factor?: number
+  postprocess_output?: boolean
+  pad_duration?: number
+  fade_duration?: number
+  audio_chunk_duration?: number
+  audio_chunk_threshold?: number
+  normalize_text?: boolean
+  seed?: number | null
   response_format?: AudioFormat
 }
 
@@ -116,6 +137,7 @@ export interface VoiceCreatePayload {
   language: string | null
   audio: Blob
   filename: string
+  preprocess_prompt?: boolean
 }
 
 export interface VoiceRetrainPayload {
@@ -124,10 +146,13 @@ export interface VoiceRetrainPayload {
   language?: string | null
   audio?: Blob | null
   filename?: string
+  preprocess_prompt?: boolean
 }
 
 export type JobType =
   | 'tts'
+  | 'tts_batch'
+  | 'transcribe'
   | 'voice_train'
   | 'voice_retrain'
   | 'voice_preview'
@@ -152,6 +177,10 @@ export interface JobSummary {
   name?: string
   transcript_provided?: boolean
   text?: string
+  count?: number
+  filename?: string
+  style_instruct?: string | null
+  seed?: number | null
   [key: string]: unknown
 }
 
@@ -164,6 +193,10 @@ export interface JobResult {
   generation_seconds?: number
   rtf?: number | null
   preview_updated_at?: string | null
+  items?: OutputMeta[]
+  count?: number
+  text?: string
+  filename?: string
   id?: string
   name?: string
   language?: string | null
@@ -200,4 +233,13 @@ export interface JobsResponse {
     cancelling: number
   }
   active: number
+}
+
+export interface BatchTTSRequest extends Omit<TTSRequest, 'text'> {
+  texts: string[]
+}
+
+export interface TranscribeResult {
+  text: string
+  filename?: string
 }

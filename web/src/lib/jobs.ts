@@ -13,6 +13,12 @@ export function jobTitle(job: Job): string {
   if (job.type === 'tts') {
     return summary.text_preview || 'Speech generation'
   }
+  if (job.type === 'tts_batch') {
+    return `Batch · ${summary.count || 'multiple'} item(s)`
+  }
+  if (job.type === 'transcribe') {
+    return `Transcribe ${summary.filename || 'audio'}`
+  }
   if (job.type === 'voice_train') {
     return `Train ${summary.name || 'voice'}`
   }
@@ -27,6 +33,8 @@ export function jobTitle(job: Job): string {
 
 export function jobTypeLabel(job: Job): string {
   if (job.type === 'tts') return 'Speech'
+  if (job.type === 'tts_batch') return 'Batch speech'
+  if (job.type === 'transcribe') return 'Transcription'
   if (job.type === 'voice_train') return 'Voice training'
   if (job.type === 'voice_retrain') return 'Voice retraining'
   if (job.type === 'voice_preview') return 'Voice preview'

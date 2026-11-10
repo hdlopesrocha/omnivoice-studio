@@ -31,6 +31,8 @@ class ModelManager:
         self.started_at = time.time()
         self.load_started_at: float | None = None
         self.loaded_at: float | None = None
+        self.lora_adapter = settings.lora_adapter
+        self.flashinfer_enabled = False
 
         self._torch: Any = None
         self._thread: threading.Thread | None = None
@@ -83,6 +85,8 @@ class ModelManager:
             self.status_message = "Reloading OmniVoice model"
             self.error = None
             self.loaded_at = None
+            self.flashinfer_enabled = False
+            self.lora_adapter = self.settings.lora_adapter
         self.start_loading()
 
     def ensure_ready(self) -> None:
@@ -150,6 +154,39 @@ class ModelManager:
                 load_asr=self.settings.load_asr,
             )
 
+            if self.settings.lora_adapter:
+                adapter_path = Path(self.settings.lora_adapter).expanduser()
+                if not adapter_path.exists():
+                    raise FileNotFoundError(
+                        f"LoRA adapter directory not found: {adapter_path}"
+                    )
+                from omnivoice.utils.lora import load_lora_adapter
+
+                logger.info("Applying LoRA adapter from %s", adapter_path)
+                model = load_lora_adapter(model, str(adapter_path))
+                self.lora_adapter = str(adapter_path)
+
+            if self.settings.flashinfer:
+                try:
+                    from omnivoice.models.omnivoice_flashinfer import (
+                        apply_flashinfer,
+                    )
+
+                    logger.info(
+                        "Enabling FlashInfer (cuda_graph=%s)",
+                        self.settings.flashinfer_cuda_graph,
+                    )
+                    apply_flashinfer(
+                        model,
+                        enable_cuda_graph=self.settings.flashinfer_cuda_graph,
+                    )
+                    self.flashinfer_enabled = True
+                except Exception:
+                    logger.exception(
+                        "FlashInfer could not be enabled; continuing without it"
+                    )
+                    self.flashinfer_enabled = False
+
             with self._model_lock:
                 self.model = model
                 self.device = str(getattr(model, "device", device))
@@ -172,13 +209,18 @@ class ModelManager:
                 self.error = str(exc)
                 self.loaded_at = None
 
-    def create_prompt(self, ref_audio: str, ref_text: str | None) -> Any:
+    def create_prompt(
+        self,
+        ref_audio: str,
+        ref_text: str | None,
+        preprocess_prompt: bool = True,
+    ) -> Any:
         with self._model_lock:
             self.ensure_ready()
             return self.model.create_voice_clone_prompt(
                 ref_audio=ref_audio,
                 ref_text=ref_text or None,
-                preprocess_prompt=True,
+                preprocess_prompt=preprocess_prompt,
             )
 
     def load_prompt(self, voice_id: str, path: Path) -> Any:
@@ -215,10 +257,33 @@ class ModelManager:
         num_step: int = 32,
         guidance_scale: float = 2.0,
         denoise: bool = True,
+        t_shift: float = 0.1,
+        position_temperature: float = 5.0,
+        class_temperature: float = 0.0,
+        layer_penalty_factor: float = 5.0,
         postprocess_output: bool = True,
+        pad_duration: float = 0.1,
+        fade_duration: float = 0.1,
+        audio_chunk_duration: float = 15.0,
+        audio_chunk_threshold: float = 30.0,
+        normalize_text: bool = False,
+        seed: int | None = None,
     ) -> tuple[Any, int, float]:
         with self._model_lock:
             self.ensure_ready()
+            if seed is not None:
+                import random
+
+                import numpy as np
+
+                random.seed(seed)
+                np.random.seed(seed)
+                self._torch.manual_seed(seed)
+                try:
+                    if self._torch.cuda.is_available():
+                        self._torch.cuda.manual_seed_all(seed)
+                except Exception:
+                    pass
             started = time.time()
             audios = self.model.generate(
                 text=text,
@@ -230,9 +295,23 @@ class ModelManager:
                 num_step=num_step,
                 guidance_scale=guidance_scale,
                 denoise=denoise,
+                t_shift=t_shift,
+                position_temperature=position_temperature,
+                class_temperature=class_temperature,
+                layer_penalty_factor=layer_penalty_factor,
                 postprocess_output=postprocess_output,
-                audio_chunk_duration=15.0,
-                audio_chunk_threshold=30.0,
+                pad_duration=pad_duration,
+                fade_duration=fade_duration,
+                audio_chunk_duration=audio_chunk_duration,
+                audio_chunk_threshold=audio_chunk_threshold,
+                normalize_text=normalize_text,
             )
             elapsed = time.time() - started
             return audios[0], self.sample_rate, elapsed
+
+    def transcribe(self, audio_path: str) -> str:
+        with self._model_lock:
+            self.ensure_ready()
+            if getattr(self.model, "_asr_pipe", None) is None:
+                self.model.load_asr_model()
+            return self.model.transcribe(audio_path)

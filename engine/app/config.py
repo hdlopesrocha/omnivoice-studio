@@ -52,6 +52,10 @@ class Settings:
     preview_text: str
     max_queue_size: int
     max_job_history: int
+    max_import_mb: int
+    lora_adapter: str | None
+    flashinfer: bool
+    flashinfer_cuda_graph: bool
     app_version: str = "1.0.0"
 
     @property
@@ -97,4 +101,11 @@ class Settings:
             ).strip(),
             max_queue_size=_env_int("MAX_QUEUE_SIZE", 50),
             max_job_history=_env_int("MAX_JOB_HISTORY", 200),
+            max_import_mb=_env_int("MAX_IMPORT_MB", 200),
+            lora_adapter=(os.getenv("OMNIVOICE_LORA_ADAPTER") or "").strip()
+            or None,
+            flashinfer=_env_bool("OMNIVOICE_FLASHINFER", False),
+            flashinfer_cuda_graph=_env_bool(
+                "OMNIVOICE_FLASHINFER_CUDA_GRAPH", False
+            ),
         )

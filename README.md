@@ -23,6 +23,13 @@ leaving your Docker volume.
 ## What it does
 
 - **Text to speech** with OmniVoice across 600+ languages.
+- **Full generation controls**: guidance, denoise, time-step shift, sampling temperatures, layer penalty, fixed duration, seed, post-processing, padding/fades, and long-form chunking.
+- **Structured voice design** with every upstream attribute: gender, age, pitch, style, English accents, and Chinese dialects.
+- **Non-verbal tags and pronunciation control** with one-click insertion of `[laughter]`, `[sigh]`, CMU phonemes, and pinyin tone examples.
+- **ASR transcription** of reference clips and arbitrary audio using the engine's Whisper pipeline.
+- **Batch synthesis** with up to 50 items per job and a ZIP download.
+- **Voice profile export/import** as portable ZIP archives.
+- **LoRA adapter inference/merge** and optional FlashInfer acceleration.
 - **Train a voice** from a 3–10 second reference clip. OmniVoice is zero-shot,
   so “training” here means encoding the clip into a reusable voice-clone prompt
   (no model-weight fine-tuning). The prompt is cached on disk and reused.
@@ -133,6 +140,106 @@ variant from a language code alone — the **reference clip controls the accent*
 API clients can send `language=pt` plus `language_variant=pt-PT` (recommended
 for compatibility) or `language=pt-PT` on the updated engine.
 
+## Full generation controls
+
+Studio, Design, and Batch expose an **Advanced generation controls** panel for:
+
+- fixed `duration`
+- `guidance_scale`
+- `denoise`
+- `t_shift`
+- `position_temperature`
+- `class_temperature`
+- `layer_penalty_factor`
+- `postprocess_output`
+- `pad_duration` / `fade_duration`
+- `audio_chunk_duration` / `audio_chunk_threshold`
+- `normalize_text` (numbers, dates, currency)
+- `seed`
+- optional `style_instruct` when cloning a voice
+
+The same fields are accepted by the API and CLI.
+
+## Batch synthesis
+
+The **Batch** page turns paragraphs or lines into separate audio files:
+
+- split by blank line or one item per line
+- up to 50 items per job
+- common voice, language, and advanced settings
+- per-item progress and cancellation
+- ZIP download with a metadata manifest
+
+CLI equivalent:
+
+```bash
+make batch FILE=items.txt VOICE_ID=<voice-id> LANG=en OUT=batch.zip
+```
+
+## Transcription
+
+Use the **Transcribe sample** button in Voices, or:
+
+```bash
+make transcribe AUDIO=reference.wav
+```
+
+The engine uses the configured Whisper model and caches it in the data volume.
+Transcription is also available as a cancellable job at
+`POST /api/jobs/transcribe`.
+
+## Voice profile export/import
+
+Export a profile (metadata, reference audio, cached prompt, optional preview)
+as a ZIP from the voice card. Import it from the Voices header or CLI:
+
+```bash
+make export-voice VOICE_ID=<voice-id> OUT=voice.zip
+make import-voice FILE=voice.zip
+```
+
+## LoRA and FlashInfer
+
+LoRA adapter inference is supported through the upstream PEFT integration:
+
+```dotenv
+# Put the adapter under /data/loras or mount it into the container.
+OMNIVOICE_LORA_ADAPTER=/data/loras/checkpoint-500
+```
+
+Merge an adapter into a standalone checkpoint with:
+
+```bash
+make merge-lora   ADAPTER=/data/loras/checkpoint-500   OUTPUT=/data/loras/merged
+```
+
+Then set `OMNIVOICE_MODEL=/data/loras/merged` and restart the engine.
+
+Optional FlashInfer acceleration (GPU only; requires FlashInfer installed):
+
+```dotenv
+OMNIVOICE_FLASHINFER=1
+OMNIVOICE_FLASHINFER_CUDA_GRAPH=1
+```
+
+Full LoRA/full fine-tuning and evaluation remain upstream research workflows.
+Starting configs and a `make train-lora` passthrough live in
+[`training/`](training/README.md). Upstream batch inference is available via
+`make infer-batch`.
+
+## Generation tips
+
+- **Short clips:** 1–2 second outputs without a reference can be unreliable.
+  Use a voice profile for short speech.
+- **Style hints:** when a reference clip and `style_instruct` disagree, the
+  reference usually wins. Consistent hints can improve cloning stability.
+- **Min Nan Chinese (Hokkien):** write it in Tâi-lô romanization; Chinese
+  characters are not supported for Min Nan in this model version.
+- **Pronunciation control:** use CMU phonemes in brackets for English, e.g.
+  `[B EY1 S]`, and pinyin with tone digits for Chinese, e.g. `ZHE2`.
+- **Non-verbal tags:** `[laughter]`, `[sigh]`, question/surprise tags, and
+  `[dissatisfaction-hnn]` are supported inline.
+
 ## Jobs and cancellation
 
 Every long-running operation — TTS, voice training, retraining, and previews —
@@ -190,6 +297,13 @@ make say TEXT="A designed voice." MODE=design \
 | `make voice NAME=… AUDIO=…` | Train a profile from the CLI |
 | `make say TEXT=…` | Generate speech from the CLI |
 | `make preview VOICE_ID=…` | Generate a voice preview |
+| `make batch FILE=…` | Batch synthesize a text file |
+| `make transcribe AUDIO=…` | Transcribe an audio file |
+| `make export-voice VOICE_ID=…` | Export a voice profile ZIP |
+| `make import-voice FILE=…` | Import a voice profile ZIP |
+| `make merge-lora ADAPTER=… OUTPUT=…` | Merge a LoRA adapter |
+| `make infer-batch TEST_LIST=… RES_DIR=…` | Upstream multi-GPU batch inference |
+| `make train-lora TRAIN_CONFIG=… DATA_CONFIG=… OUTPUT_DIR=…` | Upstream LoRA training |
 | `make jobs` / `make job JOB_ID=…` | List or inspect jobs |
 | `make cancel JOB_ID=…` | Cancel a queued/running job |
 | `make cancel-queued` | Cancel every queued job |
@@ -235,6 +349,13 @@ through `http://localhost:8088/api`.
 | `GET` | `/api/outputs` | Generation history |
 | `GET` | `/api/outputs/{id}` | Fetch audio (`?download=1` to attach) |
 | `DELETE` | `/api/outputs/{id}` | Delete a generation |
+| `POST` | `/api/batch` | Synchronous batch synthesis |
+| `POST` | `/api/transcribe` | Synchronous transcription |
+| `POST` | `/api/jobs/batch` | Enqueue batch synthesis |
+| `POST` | `/api/jobs/transcribe` | Enqueue transcription |
+| `GET` | `/api/jobs/{id}/zip` | Download a completed batch ZIP |
+| `GET` | `/api/voices/{id}/export` | Export a voice profile ZIP |
+| `POST` | `/api/voices/import` | Import a voice profile ZIP |
 | `GET` | `/api/jobs` | Queue counts and recent jobs |
 | `POST` | `/api/jobs/tts` | Enqueue speech synthesis |
 | `POST` | `/api/jobs/voices` | Enqueue voice training |
@@ -321,6 +442,10 @@ useful variables:
 | `MAX_VOICE_SECONDS` | `30` | Reference clip length limit |
 | `MAX_QUEUE_SIZE` | `50` | Maximum queued jobs before HTTP 429 |
 | `MAX_JOB_HISTORY` | `200` | Finished job records kept in memory |
+| `MAX_IMPORT_MB` | `200` | Voice profile import archive limit |
+| `OMNIVOICE_LORA_ADAPTER` | unset | LoRA adapter directory for inference |
+| `OMNIVOICE_FLASHINFER` | `0` | Enable FlashInfer if installed (GPU) |
+| `OMNIVOICE_FLASHINFER_CUDA_GRAPH` | `0` | Enable FlashInfer CUDA graphs |
 | `CORS_ORIGINS` | local web origins | Comma-separated origins for direct API access |
 | `TORCH_INDEX_URL` | auto (CPU or cu128) | Override for a different CUDA build |
 | `TORCH_VERSION` | `2.8.0` | PyTorch/torchaudio version |
@@ -400,16 +525,19 @@ Project layout:
 │   └── Dockerfile
 ├── web/                    # Vue 3 + Vite + TypeScript
 │   ├── src/
-│   │   ├── views/          # Studio, Voices, Design, Jobs, History, About
-│   │   ├── components/
-│   │   └── lib/            # API, job polling, store, formatting
+│   │   ├── views/          # Studio, Voices, Design, Batch, Jobs, History, About
+│   │   ├── components/     # player, recorder, advanced settings, designer
+│   │   └── lib/            # API, job polling, store, generation, formatting
 │   ├── nginx.conf
 │   └── Dockerfile
-└── scripts/tts.py          # dependency-free CLI helper
+├── scripts/
+│   ├── tts.py              # single synthesis CLI helper
+│   └── batch.py            # batch synthesis CLI helper
+└── training/               # upstream LoRA configs and guide
 ```
 
-The frontend is a single-page app with six views: Studio, Voices, Design, Jobs,
-History, and About. The engine exposes a JSON/multipart API and stores profiles
+The frontend is a single-page app with seven views: Studio, Voices, Design,
+Batch, Jobs, History, and About. The engine exposes a JSON/multipart API and stores profiles
 as directories with a `meta.json`, `reference.wav`, and cached `prompt.pt`.
 
 ## Troubleshooting

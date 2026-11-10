@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import {
   ArrowRight,
@@ -16,6 +16,7 @@ import {
 } from '@lucide/vue'
 import AudioButton from '../components/AudioButton.vue'
 import GenerationSettings from '../components/GenerationSettings.vue'
+import TextAssist from '../components/TextAssist.vue'
 import ResultCard from '../components/ResultCard.vue'
 import { api, getErrorMessage } from '../lib/api'
 import {
@@ -34,6 +35,10 @@ import {
 } from '../lib/jobs'
 import { languageVariant, modelLanguage } from '../lib/language'
 import {
+  advancedToRequest,
+  defaultAdvanced,
+} from '../lib/generation'
+import {
   modelReady,
   refreshHistory,
   store,
@@ -48,12 +53,14 @@ const requestedVoiceId = ref<string | null>(
 )
 
 const text = ref('')
+const textArea = ref<HTMLTextAreaElement | null>(null)
 const mode = ref<'voice' | 'auto'>('voice')
 const voiceId = ref<string | null>(null)
 const language = ref<string | null>(null)
 const speed = ref(1)
 const numStep = ref(32)
 const format = ref<AudioFormat>('wav')
+const advanced = reactive(defaultAdvanced())
 const error = ref('')
 const activeJob = ref<Job | null>(null)
 
@@ -158,6 +165,22 @@ function clearText(): void {
   error.value = ''
 }
 
+function insertToken(token: string): void {
+  const element = textArea.value
+  if (!element) {
+    text.value = `${text.value}${text.value ? ' ' : ''}${token}`
+    return
+  }
+  const start = element.selectionStart ?? text.value.length
+  const end = element.selectionEnd ?? start
+  text.value = text.value.slice(0, start) + token + text.value.slice(end)
+  void nextTick(() => {
+    element.focus()
+    const position = start + token.length
+    element.setSelectionRange(position, position)
+  })
+}
+
 async function generate(): Promise<void> {
   if (!modelReady.value) {
     toast('info', 'Model is still warming up', 'Try again when the status pill turns green.')
@@ -185,6 +208,7 @@ async function generate(): Promise<void> {
       speed: speed.value,
       num_step: numStep.value,
       response_format: format.value,
+      ...advancedToRequest(advanced),
     })
     if (token !== jobToken) return
     activeJob.value = job
@@ -301,6 +325,7 @@ onBeforeUnmount(() => {
         </div>
 
         <textarea
+          ref="textArea"
           v-model="text"
           class="textarea composer-textarea no-resize"
           maxlength="8000"
@@ -309,6 +334,8 @@ onBeforeUnmount(() => {
           @keydown.ctrl.enter.prevent="generate"
           @keydown.meta.enter.prevent="generate"
         />
+
+        <TextAssist @insert="insertToken" />
 
         <div class="sample-prompts">
           <button
@@ -469,6 +496,8 @@ onBeforeUnmount(() => {
             v-model:num-step="numStep"
             v-model:format="format"
             :languages="store.languages"
+            :advanced="advanced"
+            :show-style="mode === 'voice'"
           />
         </section>
       </div>

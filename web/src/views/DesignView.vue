@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref } from 'vue'
 import {
   Ban,
   Clock3,
@@ -11,6 +11,8 @@ import {
 } from '@lucide/vue'
 import GenerationSettings from '../components/GenerationSettings.vue'
 import ResultCard from '../components/ResultCard.vue'
+import TextAssist from '../components/TextAssist.vue'
+import VoiceDesigner from '../components/VoiceDesigner.vue'
 import { api, getErrorMessage } from '../lib/api'
 import { formatTime, languageName } from '../lib/format'
 import {
@@ -21,6 +23,10 @@ import {
 } from '../lib/jobs'
 import { languageVariant, modelLanguage } from '../lib/language'
 import {
+  advancedToRequest,
+  defaultAdvanced,
+} from '../lib/generation'
+import {
   modelReady,
   refreshHistory,
   store,
@@ -30,11 +36,13 @@ import { toast } from '../lib/toast'
 import type { AudioFormat, Job } from '../lib/types'
 
 const text = ref('')
+const textArea = ref<HTMLTextAreaElement | null>(null)
 const instruct = ref('')
 const language = ref<string | null>(null)
 const speed = ref(1)
 const numStep = ref(32)
 const format = ref<AudioFormat>('wav')
+const advanced = reactive(defaultAdvanced())
 const error = ref('')
 const activeJob = ref<Job | null>(null)
 
@@ -81,6 +89,22 @@ function usePreset(value: string): void {
   instruct.value = value
 }
 
+function insertToken(token: string): void {
+  const element = textArea.value
+  if (!element) {
+    text.value = `${text.value}${text.value ? ' ' : ''}${token}`
+    return
+  }
+  const start = element.selectionStart ?? text.value.length
+  const end = element.selectionEnd ?? start
+  text.value = text.value.slice(0, start) + token + text.value.slice(end)
+  void nextTick(() => {
+    element.focus()
+    const position = start + token.length
+    element.setSelectionRange(position, position)
+  })
+}
+
 async function generate(): Promise<void> {
   if (!modelReady.value) {
     toast('info', 'Model is still warming up', 'Try again when the status pill turns green.')
@@ -108,6 +132,7 @@ async function generate(): Promise<void> {
       speed: speed.value,
       num_step: numStep.value,
       response_format: format.value,
+      ...advancedToRequest(advanced),
     })
     if (token !== jobToken) return
     activeJob.value = job
@@ -219,6 +244,7 @@ onBeforeUnmount(() => {
         </div>
 
         <textarea
+          ref="textArea"
           v-model="text"
           class="textarea composer-textarea no-resize"
           maxlength="8000"
@@ -226,6 +252,8 @@ onBeforeUnmount(() => {
           @keydown.ctrl.enter.prevent="generate"
           @keydown.meta.enter.prevent="generate"
         />
+
+        <TextAssist @insert="insertToken" />
 
         <div class="field" style="margin-top: 16px">
           <label class="field-label">Voice description</label>
@@ -239,6 +267,8 @@ onBeforeUnmount(() => {
             Attributes are comma-separated and can be freely combined.
           </span>
         </div>
+
+        <VoiceDesigner @apply="instruct = $event" />
 
         <div class="sample-prompts">
           <button
@@ -291,6 +321,7 @@ onBeforeUnmount(() => {
             v-model:num-step="numStep"
             v-model:format="format"
             :languages="store.languages"
+            :advanced="advanced"
           />
         </section>
 

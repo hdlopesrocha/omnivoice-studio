@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref } from 'vue'
 import {
   Ban,
+  Download,
   FileAudio2,
   Mic2,
   Pencil,
@@ -43,8 +44,11 @@ const sample = ref<SampleUpload | null>(null)
 const samplePreviewUrl = ref('')
 const dragActive = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
+const importInput = ref<HTMLInputElement | null>(null)
 const formError = ref('')
 const previewing = ref<string | null>(null)
+const transcribing = ref(false)
+const importing = ref(false)
 const activeJob = ref<Job | null>(null)
 
 const form = reactive({
@@ -52,6 +56,7 @@ const form = reactive({
   transcript: '',
   language: null as string | null,
   consent: false,
+  preprocess_prompt: true,
 })
 
 let jobToken = 0
@@ -90,6 +95,7 @@ function resetForm(): void {
   form.transcript = ''
   form.language = null
   form.consent = false
+  form.preprocess_prompt = true
   sample.value = null
   sampleMode.value = 'record'
   formError.value = ''
@@ -130,6 +136,7 @@ function openRetrain(voice: Voice): void {
   form.transcript = voice.transcript || ''
   form.language = voice.language
   form.consent = true
+  form.preprocess_prompt = true
   showForm.value = true
   void scrollToForm()
 }
@@ -202,6 +209,45 @@ function setSampleMode(next: 'record' | 'upload'): void {
   clearSample()
 }
 
+async function transcribeSample(): Promise<void> {
+  if (!sample.value || transcribing.value) return
+  transcribing.value = true
+  try {
+    const result = await api.transcribe(
+      sample.value.blob,
+      sample.value.filename,
+    )
+    form.transcript = result.text
+    formError.value = ''
+    toast(
+      'success',
+      'Transcript ready',
+      result.text ? result.text.slice(0, 180) : 'The transcript is empty.',
+    )
+  } catch (error) {
+    toast('error', 'Transcription failed', getErrorMessage(error))
+  } finally {
+    transcribing.value = false
+  }
+}
+
+async function onImportFile(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  importing.value = true
+  try {
+    const voice = await api.importVoice(file)
+    await refreshVoices()
+    toast('success', 'Voice imported', `${voice.name} is ready to use.`)
+  } catch (error) {
+    toast('error', 'Import failed', getErrorMessage(error))
+  } finally {
+    importing.value = false
+  }
+}
+
 async function submit(): Promise<void> {
   formError.value = ''
   if (trainingActive.value) return
@@ -234,6 +280,7 @@ async function submit(): Promise<void> {
             language: form.language,
             audio: sample.value?.blob || null,
             filename: sample.value?.filename,
+            preprocess_prompt: form.preprocess_prompt,
           })
         : sample.value
           ? await api.submitVoiceJob({
@@ -242,6 +289,7 @@ async function submit(): Promise<void> {
               language: form.language,
               audio: sample.value.blob,
               filename: sample.value.filename,
+              preprocess_prompt: form.preprocess_prompt,
             })
           : null
 
@@ -403,15 +451,34 @@ onBeforeUnmount(() => {
           fine-tuning, no cloud upload.
         </p>
       </div>
-      <button
-        type="button"
-        class="btn btn-primary"
-        :disabled="trainingActive"
-        @click="openCreate"
-      >
-        <Plus :size="15" />
-        Train voice
-      </button>
+      <div class="row">
+        <input
+          ref="importInput"
+          type="file"
+          accept=".zip,application/zip"
+          class="sr-only"
+          @change="onImportFile"
+        />
+        <button
+          type="button"
+          class="btn btn-secondary"
+          :disabled="importing"
+          @click="importInput?.click()"
+        >
+          <span v-if="importing" class="spinner" />
+          <Upload v-else :size="15" />
+          {{ importing ? 'Importing…' : 'Import voice' }}
+        </button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          :disabled="trainingActive"
+          @click="openCreate"
+        >
+          <Plus :size="15" />
+          Train voice
+        </button>
+      </div>
     </div>
 
     <div :class="showForm ? 'train-layout' : ''">
@@ -487,6 +554,14 @@ onBeforeUnmount(() => {
                 >
                   <Pencil :size="15" />
                 </button>
+                <a
+                  :href="api.exportVoiceUrl(voice.id)"
+                  class="icon-btn"
+                  title="Export voice"
+                  download
+                >
+                  <Download :size="15" />
+                </a>
                 <button
                   type="button"
                   class="icon-btn danger"
@@ -665,6 +740,18 @@ onBeforeUnmount(() => {
               </div>
               <AudioButton :src="api.referenceUrl(editing.id)" label="Listen" />
             </div>
+
+            <button
+              v-if="sample"
+              type="button"
+              class="btn btn-secondary btn-sm"
+              :disabled="transcribing || !modelReady"
+              @click="transcribeSample"
+            >
+              <span v-if="transcribing" class="spinner" />
+              <FileAudio2 v-else :size="13" />
+              {{ transcribing ? 'Transcribing…' : 'Transcribe sample' }}
+            </button>
           </div>
 
           <div class="field">
@@ -685,6 +772,13 @@ onBeforeUnmount(() => {
               faster and improves cloning quality.
             </span>
           </div>
+
+          <label class="checkbox">
+            <input v-model="form.preprocess_prompt" type="checkbox" />
+            <span>
+              Preprocess reference audio (trim long silences; recommended)
+            </span>
+          </label>
 
           <div class="field">
             <label class="field-label">Language</label>

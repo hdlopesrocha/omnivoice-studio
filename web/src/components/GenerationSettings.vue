@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { AudioFormat, Language } from '../lib/types'
+import type { AdvancedGeneration } from '../lib/generation'
+import AdvancedSettings from './AdvancedSettings.vue'
 import LanguageSelect from './LanguageSelect.vue'
 
 defineProps<{
   languages: Language[]
+  advanced: AdvancedGeneration
+  showStyle?: boolean
 }>()
 
 const language = defineModel<string | null>('language', { default: null })
@@ -82,4 +86,9 @@ const rangeStyle = computed<Record<string, string>>(() => {
       <span class="field-hint">WAV is lossless. MP3 and FLAC are smaller downloads.</span>
     </div>
   </div>
+
+  <AdvancedSettings
+    :advanced="advanced"
+    :show-style="showStyle"
+  />
 </template>

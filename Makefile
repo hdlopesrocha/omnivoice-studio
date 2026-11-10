@@ -33,12 +33,15 @@ ENGINE_PORT ?= 8000
 API := http://$(HOST):$(ENGINE_PORT)/api
 WEB_URL := http://$(HOST):$(WEB_PORT)
 WAIT_TIMEOUT ?= 3600
+OMNIVOICE_MODEL ?= k2-fsa/OmniVoice
+NUM_PROCESSES ?= 1
 JSON := python3 -m json.tool
 DATA_VOLUME := omnivoice-studio_omnivoice-data
 
 .PHONY: help env build up start up-gpu up-cpu build-gpu build-cpu down restart \
 	logs logs-engine logs-web ps wait status info voices outputs jobs job cancel cancel-queued \
-	job-audio voice train say tts preview dev dev-web install build-web check test test-engine \
+	job-audio voice train say tts batch transcribe export-voice import-voice merge-lora \
+	infer-batch train-lora preview dev dev-web install build-web check test test-engine \
 	smoke open urls backup model-reset clean
 
 help: ## Show this help
@@ -177,6 +180,35 @@ say: ## Synthesize: make say TEXT="Hello" [VOICE_ID=...] [MODE=voice|auto|design
 		--out "$(or $(OUT),out.wav)"
 
 tts: say ## Alias for say
+
+batch: ## Batch synthesize: make batch FILE=items.txt [VOICE_ID=...] [LANG=en] [OUT=batch.zip]
+	@test -n "$(FILE)" || (echo "Usage: make batch FILE=items.txt [VOICE_ID=...] [LANG=en] [OUT=batch.zip]"; exit 1)
+	@python3 scripts/batch.py 		--api "$(API)" 		--file "$(FILE)" 		--mode "$(or $(MODE),$(if $(VOICE_ID),voice,auto))" 		--voice-id "$(VOICE_ID)" 		--instruct "$(INSTRUCT)" 		--language "$(LANG)" 		--format "$(or $(FORMAT),wav)" 		--num-step "$(or $(NUM_STEP),32)" 		--split "$(or $(SPLIT),blank)" 		--out "$(or $(OUT),batch.zip)"
+
+transcribe: ## Transcribe audio: make transcribe AUDIO=file.wav
+	@test -n "$(AUDIO)" || (echo "Usage: make transcribe AUDIO=file.wav"; exit 1)
+	@curl -fsS -X POST "$(API)/transcribe" -F "audio=@$(AUDIO)" | $(JSON)
+
+export-voice: ## Export a profile: make export-voice VOICE_ID=... [OUT=voice.zip]
+	@test -n "$(VOICE_ID)" || (echo "Usage: make export-voice VOICE_ID=... [OUT=voice.zip]"; exit 1)
+	@curl -fsS "$(API)/voices/$(VOICE_ID)/export" -o "$(or $(OUT),voice-$(VOICE_ID).zip)"
+	@echo "Wrote $(or $(OUT),voice-$(VOICE_ID).zip)"
+
+import-voice: ## Import a profile: make import-voice FILE=voice.zip
+	@test -n "$(FILE)" || (echo "Usage: make import-voice FILE=voice.zip"; exit 1)
+	@curl -fsS -X POST "$(API)/voices/import" -F "archive=@$(FILE)" | $(JSON)
+
+merge-lora: ## Merge LoRA adapter: make merge-lora ADAPTER=/data/loras/ckpt OUTPUT=/data/loras/merged
+	@test -n "$(ADAPTER)" -a -n "$(OUTPUT)" || (echo "Usage: make merge-lora ADAPTER=/data/loras/checkpoint-500 OUTPUT=/data/loras/merged"; exit 1)
+	$(COMPOSE) run --rm --no-deps --user appuser engine omnivoice-merge-lora --base_model "$(OMNIVOICE_MODEL)" --lora_adapter "$(ADAPTER)" --output_dir "$(OUTPUT)"
+
+infer-batch: ## Upstream multi-GPU batch: make infer-batch TEST_LIST=/data/test.jsonl RES_DIR=/data/out [INFER_ARGS="..."]
+	@test -n "$(TEST_LIST)" -a -n "$(RES_DIR)" || (echo "Usage: make infer-batch TEST_LIST=/data/test.jsonl RES_DIR=/data/out [INFER_ARGS='...']"; exit 1)
+	$(COMPOSE) run --rm --no-deps --user appuser engine omnivoice-infer-batch --model "$(OMNIVOICE_MODEL)" --test_list "$(TEST_LIST)" --res_dir "$(RES_DIR)" $(INFER_ARGS)
+
+train-lora: ## Upstream LoRA training: make train-lora TRAIN_CONFIG=/data/training/train.json DATA_CONFIG=/data/training/data.json OUTPUT_DIR=/data/loras/run
+	@test -n "$(TRAIN_CONFIG)" -a -n "$(DATA_CONFIG)" -a -n "$(OUTPUT_DIR)" || (echo "Usage: make train-lora TRAIN_CONFIG=... DATA_CONFIG=... OUTPUT_DIR=..."; exit 1)
+	$(COMPOSE) run --rm --no-deps --user appuser engine accelerate launch --num_processes "$(NUM_PROCESSES)" -m omnivoice.cli.train --train_config "$(TRAIN_CONFIG)" --data_config "$(DATA_CONFIG)" --output_dir "$(OUTPUT_DIR)"
 
 preview: ## Generate a voice preview: make preview VOICE_ID=...
 	@test -n "$(VOICE_ID)" || (echo "Usage: make preview VOICE_ID=..."; exit 1)

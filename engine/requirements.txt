@@ -1,5 +1,7 @@
 # OmniVoice 0.2.1 is developed against this upstream dependency set.
-omnivoice==0.2.1
+# [tn] adds WeTextProcessing/num2words for normalize_text.
+omnivoice[tn]==0.2.1
+peft>=0.20.0
 transformers==5.3.0
 gradio==6.9.0
 numpy==2.2.6

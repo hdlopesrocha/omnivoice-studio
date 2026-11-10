@@ -15,7 +15,7 @@ from .runtime import (
     JobUnavailableError,
     JobValidationError,
 )
-from .schemas import TTSRequest
+from .schemas import BatchTTSRequest, TTSRequest
 from .storage import utc_now
 
 logger = logging.getLogger(__name__)
@@ -311,6 +311,40 @@ class JobManager:
 
         return self._submit("tts", summary, runner)
 
+    def submit_batch(
+        self,
+        req: BatchTTSRequest,
+        summary: dict[str, Any],
+    ) -> Job:
+        def runner(job: Job) -> dict[str, Any]:
+            return self.runtime.run_batch_tts(
+                req,
+                job.cancel_event,
+                job.update_progress,
+            )
+
+        return self._submit("tts_batch", summary, runner)
+
+    def submit_transcribe(
+        self,
+        *,
+        audio_path: Path,
+        summary: dict[str, Any],
+    ) -> Job:
+        def runner(job: Job) -> dict[str, Any]:
+            return self.runtime.transcribe_audio(
+                audio_path,
+                job.cancel_event,
+                job.update_progress,
+            )
+
+        return self._submit(
+            "transcribe",
+            summary,
+            runner,
+            cleanup_paths=[audio_path],
+        )
+
     def submit_voice(
         self,
         *,
@@ -319,6 +353,7 @@ class JobManager:
         transcript: str | None,
         transcript_provided: bool,
         audio_path: Path,
+        preprocess_prompt: bool = True,
         summary: dict[str, Any],
     ) -> Job:
         def runner(job: Job) -> dict[str, Any]:
@@ -329,6 +364,7 @@ class JobManager:
                 transcript_provided=transcript_provided,
                 audio_path=audio_path,
                 voice_id=None,
+                preprocess_prompt=preprocess_prompt,
                 cancel_event=job.cancel_event,
                 progress=job.update_progress,
             )
@@ -349,6 +385,7 @@ class JobManager:
         transcript: str | None,
         transcript_provided: bool,
         audio_path: Path | None,
+        preprocess_prompt: bool = True,
         summary: dict[str, Any],
     ) -> Job:
         def runner(job: Job) -> dict[str, Any]:
@@ -359,6 +396,7 @@ class JobManager:
                 transcript_provided=transcript_provided,
                 audio_path=audio_path,
                 voice_id=voice_id,
+                preprocess_prompt=preprocess_prompt,
                 cancel_event=job.cancel_event,
                 progress=job.update_progress,
             )
@@ -481,6 +519,15 @@ class JobManager:
             if job.status not in TERMINAL_STATUSES:
                 raise ValueError("Cannot delete a queued or running job")
             del self._jobs[job_id]
+
+    def batch_items(self, job_id: str) -> list[dict[str, Any]]:
+        with self._condition:
+            job = self._jobs.get(job_id)
+        if job is None:
+            raise KeyError("Job not found")
+        if job.status != "completed" or job.type != "tts_batch":
+            raise ValueError("Batch output is not available")
+        return list((job.result or {}).get("items", []))
 
     def audio_path(self, job_id: str) -> tuple[Path, str]:
         with self._condition:

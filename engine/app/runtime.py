@@ -16,7 +16,7 @@ from .audio import (
 )
 from .config import Settings
 from .model_manager import ModelManager, ModelNotReadyError
-from .schemas import TTSRequest
+from .schemas import BatchTTSRequest, TTSRequest
 from .storage import OutputStore, VoiceStore, utc_now
 
 ProgressFn = Callable[[float, str], None]
@@ -215,13 +215,31 @@ class AppRuntime:
                     text=chunk,
                     language=model_language,
                     voice_clone_prompt=prompt,
-                    instruct=req.instruct if req.mode == "design" else None,
+                    instruct=(
+                        req.instruct
+                        if req.mode == "design"
+                        else (
+                            req.style_instruct
+                            if req.mode == "voice"
+                            else None
+                        )
+                    ),
                     speed=req.speed,
                     duration=req.duration,
                     num_step=req.num_step,
                     guidance_scale=req.guidance_scale,
                     denoise=req.denoise,
+                    t_shift=req.t_shift,
+                    position_temperature=req.position_temperature,
+                    class_temperature=req.class_temperature,
+                    layer_penalty_factor=req.layer_penalty_factor,
                     postprocess_output=req.postprocess_output,
+                    pad_duration=req.pad_duration,
+                    fade_duration=req.fade_duration,
+                    audio_chunk_duration=req.audio_chunk_duration,
+                    audio_chunk_threshold=req.audio_chunk_threshold,
+                    normalize_text=req.normalize_text,
+                    seed=req.seed if index == 1 else None,
                 )
                 total_elapsed += elapsed
                 self._check_cancel(cancel_event)
@@ -259,8 +277,12 @@ class AppRuntime:
             "voice_id": req.voice_id if req.mode == "voice" else None,
             "voice_name": voice_meta.get("name") if voice_meta else None,
             "instruct": req.instruct if req.mode == "design" else None,
+            "style_instruct": (
+                req.style_instruct if req.mode == "voice" else None
+            ),
             "language": language,
             "language_variant": language_variant,
+            "seed": req.seed,
             "duration_seconds": round(duration, 3),
             "generation_seconds": round(total_elapsed, 3),
             "rtf": round(total_elapsed / duration, 4) if duration > 0 else None,
@@ -287,6 +309,7 @@ class AppRuntime:
         transcript_provided: bool,
         audio_path: Path | None,
         voice_id: str | None,
+        preprocess_prompt: bool = True,
         cancel_event: CancelEvent,
         progress: ProgressFn | None = None,
     ) -> dict[str, Any]:
@@ -377,7 +400,9 @@ class AppRuntime:
 
             self._progress(progress, 0.35, "Encoding the voice prompt")
             prompt = self.manager.create_prompt(
-                str(candidate_ref), transcript_clean
+                str(candidate_ref),
+                transcript_clean,
+                preprocess_prompt=preprocess_prompt,
             )
             self._check_cancel(cancel_event)
             ref_text = (
@@ -448,6 +473,50 @@ class AppRuntime:
                 temp_wav.unlink(missing_ok=True)
             if temp_prompt is not None:
                 temp_prompt.unlink(missing_ok=True)
+
+    def run_batch_tts(
+        self,
+        req: BatchTTSRequest,
+        cancel_event: CancelEvent,
+        progress: ProgressFn | None = None,
+    ) -> dict[str, Any]:
+        total = len(req.texts)
+        items: list[dict[str, Any]] = []
+        for index, text in enumerate(req.texts):
+            self._check_cancel(cancel_event)
+            item = req.to_tts_request(text)
+            item_progress = (
+                None
+                if progress is None
+                else (
+                    lambda value, message, index=index: progress(
+                        (index + value) / total,
+                        f"Item {index + 1}/{total}: {message}",
+                    )
+                )
+            )
+            items.append(
+                self.run_tts(item, cancel_event, item_progress)
+            )
+        self._progress(progress, 1.0, "Completed")
+        return {"items": items, "count": len(items)}
+
+    def transcribe_audio(
+        self,
+        audio_path: Path,
+        cancel_event: CancelEvent,
+        progress: ProgressFn | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_ready()
+        self._check_cancel(cancel_event)
+        self._progress(progress, 0.1, "Loading ASR")
+        text = self.manager.transcribe(str(audio_path))
+        self._check_cancel(cancel_event)
+        self._progress(progress, 1.0, "Completed")
+        return {
+            "text": text,
+            "filename": audio_path.name,
+        }
 
     def generate_preview(
         self,

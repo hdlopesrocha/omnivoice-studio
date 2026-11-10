@@ -43,6 +43,8 @@ class FakeManager:
     asr_loaded = False
     load_seconds = 0.1
     uptime_seconds = 1.0
+    lora_adapter = None
+    flashinfer_enabled = False
 
     def __init__(self) -> None:
         self.delay = 0.0
@@ -57,7 +59,13 @@ class FakeManager:
     def ensure_ready(self) -> None:
         return None
 
-    def create_prompt(self, ref_audio: str, ref_text: str | None) -> FakePrompt:
+    def create_prompt(
+        self,
+        ref_audio: str,
+        ref_text: str | None,
+        preprocess_prompt: bool = True,
+    ) -> FakePrompt:
+        self.preprocess_prompt = preprocess_prompt
         return FakePrompt(ref_text or "auto transcribed reference")
 
     def load_prompt(self, voice_id: str, path: Path) -> FakePrompt:
@@ -78,8 +86,33 @@ class FakeManager:
         num_step: int = 32,
         guidance_scale: float = 2.0,
         denoise: bool = True,
+        t_shift: float = 0.1,
+        position_temperature: float = 5.0,
+        class_temperature: float = 0.0,
+        layer_penalty_factor: float = 5.0,
         postprocess_output: bool = True,
+        pad_duration: float = 0.1,
+        fade_duration: float = 0.1,
+        audio_chunk_duration: float = 15.0,
+        audio_chunk_threshold: float = 30.0,
+        normalize_text: bool = False,
+        seed: int | None = None,
+        **kwargs,
     ):
+        self.last_generate = {
+            "language": language,
+            "instruct": instruct,
+            "t_shift": t_shift,
+            "position_temperature": position_temperature,
+            "class_temperature": class_temperature,
+            "layer_penalty_factor": layer_penalty_factor,
+            "pad_duration": pad_duration,
+            "fade_duration": fade_duration,
+            "audio_chunk_duration": audio_chunk_duration,
+            "audio_chunk_threshold": audio_chunk_threshold,
+            "normalize_text": normalize_text,
+            "seed": seed,
+        }
         if self.delay:
             time.sleep(self.delay)
         self.languages.append(language)
@@ -94,6 +127,9 @@ class FakeManager:
         )
         audio = (0.1 * np.sin(2 * np.pi * 220 * timeline)).astype(np.float32)
         return audio, sample_rate, 0.05
+
+    def transcribe(self, audio_path: str) -> str:
+        return "fake transcription"
 
 
 def wav_bytes(seconds: float = 2.0) -> bytes:
@@ -420,6 +456,130 @@ def test_portuguese_variants_require_matching_voice(client: TestClient):
     )
     assert direct_variant.status_code == 200, direct_variant.text
     assert fake.languages[-1] == "pt"
+
+
+def test_full_generation_controls_batch_and_transcribe(client: TestClient):
+    fake = main_module.runtime.manager
+    assert isinstance(fake, FakeManager)
+
+    voice = create_voice(client, name="Controls Voice", language="en")
+    tts = client.post(
+        "/api/tts",
+        json={
+            "text": "Testing every generation control.",
+            "mode": "voice",
+            "voice_id": voice["id"],
+            "style_instruct": "whisper",
+            "num_step": 8,
+            "guidance_scale": 3.5,
+            "denoise": False,
+            "t_shift": 0.2,
+            "position_temperature": 2.0,
+            "class_temperature": 0.1,
+            "layer_penalty_factor": 3.0,
+            "postprocess_output": False,
+            "pad_duration": 0.2,
+            "fade_duration": 0.3,
+            "audio_chunk_duration": 10.0,
+            "audio_chunk_threshold": 20.0,
+            "normalize_text": True,
+            "seed": 123,
+        },
+    )
+    assert tts.status_code == 200, tts.text
+    assert fake.last_generate["instruct"] == "whisper"
+    assert fake.last_generate["t_shift"] == 0.2
+    assert fake.last_generate["position_temperature"] == 2.0
+    assert fake.last_generate["class_temperature"] == 0.1
+    assert fake.last_generate["layer_penalty_factor"] == 3.0
+    assert fake.last_generate["pad_duration"] == 0.2
+    assert fake.last_generate["fade_duration"] == 0.3
+    assert fake.last_generate["audio_chunk_duration"] == 10.0
+    assert fake.last_generate["audio_chunk_threshold"] == 20.0
+    assert fake.last_generate["normalize_text"] is True
+    assert fake.last_generate["seed"] == 123
+
+    batch = client.post(
+        "/api/jobs/batch",
+        json={
+            "texts": ["First batch item.", "Second batch item."],
+            "mode": "auto",
+            "num_step": 4,
+        },
+    )
+    assert batch.status_code == 202, batch.text
+    batch_job = batch.json()
+    finished = wait_for_job(client, batch_job["id"])
+    assert finished["status"] == "completed", finished
+    assert finished["result"]["count"] == 2
+    assert len(finished["result"]["items"]) == 2
+
+    archive = client.get(f"/api/jobs/{batch_job['id']}/zip")
+    assert archive.status_code == 200
+    assert archive.headers["content-type"] == "application/zip"
+    assert len(archive.content) > 100
+
+    transcribe_job = client.post(
+        "/api/jobs/transcribe",
+        files={"audio": ("speech.wav", wav_bytes(), "audio/wav")},
+    )
+    assert transcribe_job.status_code == 202, transcribe_job.text
+    transcribed = wait_for_job(client, transcribe_job.json()["id"])
+    assert transcribed["status"] == "completed"
+    assert transcribed["result"]["text"] == "fake transcription"
+
+    sync_transcribe = client.post(
+        "/api/transcribe",
+        files={"audio": ("speech.wav", wav_bytes(), "audio/wav")},
+    )
+    assert sync_transcribe.status_code == 200
+    assert sync_transcribe.json()["text"] == "fake transcription"
+
+    assert client.delete(f"/api/jobs/{batch_job['id']}").status_code == 200
+    assert client.delete(f"/api/jobs/{transcribe_job.json()['id']}").status_code == 200
+
+
+def test_voice_export_import_and_preprocess(client: TestClient):
+    fake = main_module.runtime.manager
+    assert isinstance(fake, FakeManager)
+
+    response = client.post(
+        "/api/voices",
+        data={
+            "name": "Export Test",
+            "transcript": "export transcript",
+            "language": "pt-PT",
+            "consent": "true",
+            "preprocess_prompt": "false",
+        },
+        files={"audio": ("sample.wav", wav_bytes(), "audio/wav")},
+    )
+    assert response.status_code == 201, response.text
+    voice = response.json()
+    assert fake.preprocess_prompt is False
+
+    exported = client.get(f"/api/voices/{voice['id']}/export")
+    assert exported.status_code == 200
+    assert exported.headers["content-type"] == "application/zip"
+
+    imported = client.post(
+        "/api/voices/import",
+        files={
+            "archive": (
+                "voice.zip",
+                exported.content,
+                "application/zip",
+            )
+        },
+    )
+    assert imported.status_code == 201, imported.text
+    imported_voice = imported.json()
+    assert imported_voice["id"] != voice["id"]
+    assert imported_voice["name"] == "Export Test"
+    assert imported_voice["language"] == "pt-PT"
+
+    assert client.delete(f"/api/voices/{voice['id']}").status_code == 200
+    assert client.delete(f"/api/voices/{imported_voice['id']}").status_code == 200
 
 
 def test_job_voice_training_and_preview(client: TestClient):

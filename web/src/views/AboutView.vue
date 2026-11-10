@@ -165,6 +165,18 @@ onMounted(loadInfo)
               <div class="info-tile-value">{{ info?.max_queue_size ?? 50 }}</div>
             </div>
             <div class="info-tile">
+              <div class="info-tile-label">LoRA adapter</div>
+              <div class="info-tile-value">
+                {{ health?.lora_adapter ? 'Active' : 'None' }}
+              </div>
+            </div>
+            <div class="info-tile">
+              <div class="info-tile-label">FlashInfer</div>
+              <div class="info-tile-value">
+                {{ health?.flashinfer ? 'Enabled' : 'Off' }}
+              </div>
+            </div>
+            <div class="info-tile">
               <div class="info-tile-label">Uptime</div>
               <div class="info-tile-value">{{ uptimeLabel }}</div>
             </div>

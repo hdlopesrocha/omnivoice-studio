@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import logging
 import os
+import shutil
 import time
 import uuid
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -21,13 +25,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.routing import APIRouter
 
-from .audio import MIME_TYPES
+from .audio import MIME_TYPES, probe_duration
 from .config import Settings
 from .jobs import Job, JobManager, QueueFullError
 from .languages import LANGUAGE_PAYLOAD
 from .model_manager import ModelManager
 from .runtime import AppRuntime, PORTUGUESE_VARIANTS
-from .schemas import OpenAISpeechRequest, TTSRequest, VoiceRename
+from .schemas import (
+    BatchTTSRequest,
+    OpenAISpeechRequest,
+    TTSRequest,
+    VoiceRename,
+)
 from .storage import OutputStore, VoiceStore, utc_now
 
 logging.basicConfig(
@@ -146,6 +155,7 @@ def _public_output(meta: dict[str, Any]) -> dict[str, Any]:
         "duration_seconds": meta.get("duration_seconds", 0),
         "generation_seconds": meta.get("generation_seconds", 0),
         "rtf": meta.get("rtf"),
+        "seed": meta.get("seed"),
         "created_at": meta.get("created_at"),
         "size_bytes": meta.get("size_bytes", 0),
     }
@@ -301,6 +311,10 @@ def _tts_summary(
                 else None
             )
         ),
+        "style_instruct": (
+            req.style_instruct if req.mode == "voice" else None
+        ),
+        "seed": req.seed,
         "format": req.response_format,
     }
 
@@ -361,6 +375,8 @@ async def health() -> dict[str, Any]:
         "voices": len(voices.list_meta()),
         "outputs": outputs.count(),
         "jobs": job_state["active"],
+        "lora_adapter": manager.lora_adapter,
+        "flashinfer": manager.flashinfer_enabled,
         "version": settings.app_version,
     }
 
@@ -379,6 +395,10 @@ async def info() -> dict[str, Any]:
         "max_voice_seconds": settings.max_voice_seconds,
         "max_queue_size": settings.max_queue_size,
         "max_job_history": settings.max_job_history,
+        "max_import_mb": settings.max_import_mb,
+        "lora_adapter": manager.lora_adapter,
+        "flashinfer": manager.flashinfer_enabled,
+        "normalize_text": True,
         "formats": list(MIME_TYPES),
         "modes": ["voice", "design", "auto"],
         "preview_text": settings.preview_text,
@@ -419,6 +439,46 @@ async def submit_tts_job(req: TTSRequest) -> dict[str, Any]:
     return jobs.public(job)
 
 
+@router.post("/jobs/batch", status_code=202, tags=["Jobs"])
+async def submit_batch_job(req: BatchTTSRequest) -> dict[str, Any]:
+    probe = req.to_tts_request(req.texts[0])
+    voice_meta = _validate_tts(probe)
+    summary = _tts_summary(probe, voice_meta)
+    summary["kind"] = "tts_batch"
+    summary["count"] = len(req.texts)
+    summary["text_preview"] = req.texts[0][:140]
+    try:
+        job = jobs.submit_batch(req, summary)
+    except QueueFullError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return jobs.public(job)
+
+
+@router.post("/jobs/transcribe", status_code=202, tags=["Jobs"])
+async def submit_transcribe_job(
+    audio: UploadFile = File(...),
+) -> dict[str, Any]:
+    audio_path = await _save_upload_temp(audio)
+    summary = {
+        "kind": "transcribe",
+        "filename": audio.filename or audio_path.name,
+    }
+    try:
+        job = jobs.submit_transcribe(
+            audio_path=audio_path,
+            summary=summary,
+        )
+    except QueueFullError as exc:
+        _cleanup_paths([audio_path])
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        _cleanup_paths([audio_path])
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return jobs.public(job)
+
+
 @router.post("/jobs/voices", status_code=202, tags=["Jobs"])
 async def submit_voice_job(
     name: str = Form(..., max_length=60),
@@ -426,6 +486,7 @@ async def submit_voice_job(
     transcript: str | None = Form(None),
     language: str | None = Form(None),
     consent: bool = Form(False),
+    preprocess_prompt: bool = Form(True),
 ) -> dict[str, Any]:
     name = (name or "").strip()
     if not name:
@@ -456,6 +517,7 @@ async def submit_voice_job(
             transcript=transcript_clean,
             transcript_provided=transcript is not None,
             audio_path=audio_path,
+            preprocess_prompt=preprocess_prompt,
             summary=summary,
         )
     except QueueFullError as exc:
@@ -479,6 +541,7 @@ async def submit_retrain_job(
     language: str | None = Form(None),
     name: str | None = Form(None, max_length=60),
     consent: bool = Form(False),
+    preprocess_prompt: bool = Form(True),
 ) -> dict[str, Any]:
     try:
         meta = voices.get_meta(voice_id)
@@ -522,6 +585,7 @@ async def submit_retrain_job(
             transcript=transcript,
             transcript_provided=transcript is not None,
             audio_path=audio_path,
+            preprocess_prompt=preprocess_prompt,
             summary=summary,
         )
     except QueueFullError as exc:
@@ -612,6 +676,55 @@ async def get_job_audio(
     return FileResponse(path, media_type=media_type, filename=filename)
 
 
+@router.get("/jobs/{job_id}/zip", tags=["Jobs"])
+async def get_batch_zip(job_id: str) -> Response:
+    try:
+        items = jobs.batch_items(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    buffer = io.BytesIO()
+    manifest: list[dict[str, Any]] = []
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for index, meta in enumerate(items, start=1):
+            try:
+                path = outputs.audio_path(meta)
+            except KeyError:
+                continue
+            archive.write(
+                path,
+                arcname=f"{index:02d}-{meta['id']}.{meta['format']}",
+            )
+            manifest.append(
+                {
+                    "index": index,
+                    "output_id": meta.get("id"),
+                    "text": meta.get("text"),
+                    "voice_name": meta.get("voice_name"),
+                    "language": meta.get("language"),
+                    "language_variant": meta.get("language_variant"),
+                    "duration_seconds": meta.get("duration_seconds"),
+                    "format": meta.get("format"),
+                }
+            )
+        archive.writestr(
+            "metadata.json",
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+        )
+    buffer.seek(0)
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="omnivoice-batch-{job_id}.zip"'
+            )
+        },
+    )
+
+
 # ── Voices ─────────────────────────────────────────────────────────────────
 
 
@@ -635,6 +748,7 @@ async def create_voice(
     transcript: str | None = Form(None),
     language: str | None = Form(None),
     consent: bool = Form(False),
+    preprocess_prompt: bool = Form(True),
 ) -> dict[str, Any]:
     name = (name or "").strip()
     if not name:
@@ -664,6 +778,7 @@ async def create_voice(
             transcript=transcript_clean,
             transcript_provided=transcript is not None,
             audio_path=audio_path,
+            preprocess_prompt=preprocess_prompt,
             summary=summary,
         )
     except QueueFullError as exc:
@@ -685,6 +800,7 @@ async def retrain_voice(
     language: str | None = Form(None),
     name: str | None = Form(None, max_length=60),
     consent: bool = Form(False),
+    preprocess_prompt: bool = Form(True),
 ) -> dict[str, Any]:
     try:
         meta = voices.get_meta(voice_id)
@@ -728,6 +844,7 @@ async def retrain_voice(
             transcript=transcript,
             transcript_provided=transcript is not None,
             audio_path=audio_path,
+            preprocess_prompt=preprocess_prompt,
             summary=summary,
         )
     except QueueFullError as exc:
@@ -791,6 +908,135 @@ async def get_preview(voice_id: str) -> FileResponse:
     return FileResponse(path, media_type="audio/wav")
 
 
+@router.get("/voices/{voice_id}/export", tags=["Voices"])
+async def export_voice(voice_id: str) -> Response:
+    try:
+        meta = voices.get_meta(voice_id)
+        reference = voices.reference_path(voice_id)
+        prompt = voices.prompt_path(voice_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Voice not found") from exc
+    if not reference.is_file() or not prompt.is_file():
+        raise HTTPException(
+            status_code=409,
+            detail="Voice profile is incomplete and cannot be exported",
+        )
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "meta.json",
+            json.dumps(meta, ensure_ascii=False, indent=2),
+        )
+        archive.write(reference, arcname="reference.wav")
+        archive.write(prompt, arcname="prompt.pt")
+        preview = voices.preview_path(voice_id)
+        if preview.is_file():
+            archive.write(preview, arcname="preview.wav")
+    buffer.seek(0)
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="omnivoice-voice-{voice_id}.zip"'
+            )
+        },
+    )
+
+
+@router.post("/voices/import", status_code=201, tags=["Voices"])
+async def import_voice(archive: UploadFile = File(...)) -> dict[str, Any]:
+    data = await _read_upload(
+        archive,
+        settings.max_import_mb * 1024 * 1024,
+    )
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as bundle:
+            names = set(bundle.namelist())
+            required = {"meta.json", "reference.wav", "prompt.pt"}
+            if not required.issubset(names):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Voice archive must contain meta.json, "
+                        "reference.wav, and prompt.pt"
+                    ),
+                )
+            meta = json.loads(bundle.read("meta.json"))
+            if not isinstance(meta, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="meta.json must contain a JSON object",
+                )
+            reference_bytes = bundle.read("reference.wav")
+            prompt_bytes = bundle.read("prompt.pt")
+            preview_bytes = (
+                bundle.read("preview.wav")
+                if "preview.wav" in names
+                else None
+            )
+    except HTTPException:
+        raise
+    except (zipfile.BadZipFile, json.JSONDecodeError, KeyError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid voice archive: {exc}",
+        ) from exc
+
+    voice_id, _ = voices.create()
+    try:
+        reference_path = voices.reference_path(voice_id)
+        reference_path.write_bytes(reference_bytes)
+        duration = probe_duration(reference_path)
+        if duration < settings.min_voice_seconds:
+            raise HTTPException(
+                status_code=400,
+                detail="Imported reference audio is too short",
+            )
+        if duration > settings.max_voice_seconds:
+            raise HTTPException(
+                status_code=400,
+                detail="Imported reference audio is too long",
+            )
+
+        prompt_path = voices.prompt_path(voice_id)
+        prompt_path.write_bytes(prompt_bytes)
+        manager.load_prompt(voice_id, prompt_path)
+
+        preview_path = voices.preview_path(voice_id)
+        if preview_bytes:
+            preview_path.write_bytes(preview_bytes)
+
+        now = utc_now()
+        name = str(meta.get("name") or "Imported voice").strip()
+        meta = {
+            **meta,
+            "id": voice_id,
+            "name": name or "Imported voice",
+            "duration_seconds": round(duration, 3),
+            "sample_rate": 24_000,
+            "created_at": now,
+            "updated_at": now,
+            "has_preview": bool(preview_bytes),
+            "preview_updated_at": now if preview_bytes else None,
+            "reference_filename": "reference.wav",
+            "prompt_filename": "prompt.pt",
+        }
+        voices.save_meta(voice_id, meta)
+        return _public_voice(meta)
+    except HTTPException:
+        voices.delete(voice_id)
+        raise
+    except Exception as exc:
+        voices.delete(voice_id)
+        logger.exception("Voice import failed")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not import voice profile: {exc}",
+        ) from exc
+
+
 @router.post("/voices/{voice_id}/preview", tags=["Voices"])
 async def create_preview(
     voice_id: str,
@@ -839,6 +1085,44 @@ async def create_preview(
             ),
         },
     )
+
+
+@router.post("/batch", tags=["Speech"])
+async def batch_tts(req: BatchTTSRequest) -> dict[str, Any]:
+    probe = req.to_tts_request(req.texts[0])
+    voice_meta = _validate_tts(probe)
+    summary = _tts_summary(probe, voice_meta)
+    summary["kind"] = "tts_batch"
+    summary["count"] = len(req.texts)
+    summary["text_preview"] = req.texts[0][:140]
+    try:
+        job = jobs.submit_batch(req, summary)
+    except QueueFullError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return await _wait_job(job)
+
+
+@router.post("/transcribe", tags=["Speech"])
+async def transcribe(audio: UploadFile = File(...)) -> dict[str, Any]:
+    audio_path = await _save_upload_temp(audio)
+    summary = {
+        "kind": "transcribe",
+        "filename": audio.filename or audio_path.name,
+    }
+    try:
+        job = jobs.submit_transcribe(
+            audio_path=audio_path,
+            summary=summary,
+        )
+    except QueueFullError as exc:
+        _cleanup_paths([audio_path])
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        _cleanup_paths([audio_path])
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return await _wait_job(job)
 
 
 # ── Speech ─────────────────────────────────────────────────────────────────
@@ -928,9 +1212,12 @@ async def openai_speech(req: OpenAISpeechRequest) -> Response:
         mode=mode,  # type: ignore[arg-type]
         voice_id=voice_id,
         instruct=instruct,
+        style_instruct=req.style_instruct,
         language=req.language,
         language_variant=req.language_variant,
         speed=req.speed,
+        normalize_text=req.normalize_text,
+        seed=req.seed,
         response_format=req.response_format,
     )
     voice_meta = _validate_tts(tts_req)

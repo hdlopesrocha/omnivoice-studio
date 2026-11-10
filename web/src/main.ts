@@ -35,6 +35,15 @@ const router = createRouter({
       },
     },
     {
+      path: '/batch',
+      name: 'batch',
+      component: () => import('./views/BatchView.vue'),
+      meta: {
+        title: 'Batch',
+        subtitle: 'Generate a list of paragraphs as separate audio files.',
+      },
+    },
+    {
       path: '/jobs',
       name: 'jobs',
       component: () => import('./views/JobsView.vue'),

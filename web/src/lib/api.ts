@@ -1,5 +1,6 @@
 import type {
   AudioFormat,
+  BatchTTSRequest,
   Health,
   Info,
   Job,
@@ -7,6 +8,7 @@ import type {
   LanguagesResponse,
   OutputMeta,
   SampleUpload,
+  TranscribeResult,
   TTSRequest,
   TTSResult,
   Voice,
@@ -94,6 +96,7 @@ export const api = {
     form.append('transcript', payload.transcript)
     form.append('language', payload.language || '')
     form.append('consent', 'true')
+    form.append('preprocess_prompt', String(payload.preprocess_prompt ?? true))
     form.append('audio', payload.audio, payload.filename)
     return requestJson<Voice>('/voices', { method: 'POST', body: form })
   },
@@ -104,6 +107,7 @@ export const api = {
     if (payload.transcript !== undefined) form.append('transcript', payload.transcript || '')
     if (payload.language !== undefined) form.append('language', payload.language || '')
     form.append('consent', 'true')
+    form.append('preprocess_prompt', String(payload.preprocess_prompt ?? true))
     if (payload.audio) form.append('audio', payload.audio, payload.filename || 'sample.wav')
     return requestJson<Voice>(`/voices/${voiceId}/retrain`, {
       method: 'POST',
@@ -139,12 +143,47 @@ export const api = {
     })
   },
 
+  submitBatchJob(payload: BatchTTSRequest): Promise<Job> {
+    return requestJson<Job>('/jobs/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+  },
+
+  async submitTranscribeJob(audio: Blob, filename = 'audio.wav'): Promise<Job> {
+    const form = new FormData()
+    form.append('audio', audio, filename)
+    return requestJson<Job>('/jobs/transcribe', { method: 'POST', body: form })
+  },
+
+  async transcribe(audio: Blob, filename = 'audio.wav'): Promise<TranscribeResult> {
+    const form = new FormData()
+    form.append('audio', audio, filename)
+    return requestJson<TranscribeResult>('/transcribe', { method: 'POST', body: form })
+  },
+
+  async importVoice(archive: File): Promise<Voice> {
+    const form = new FormData()
+    form.append('archive', archive, archive.name)
+    return requestJson<Voice>('/voices/import', { method: 'POST', body: form })
+  },
+
+  exportVoiceUrl(voiceId: string): string {
+    return apiUrl(`/voices/${voiceId}/export`)
+  },
+
+  jobZipUrl(jobId: string): string {
+    return apiUrl(`/jobs/${jobId}/zip`)
+  },
+
   async submitVoiceJob(payload: VoiceCreatePayload): Promise<Job> {
     const form = new FormData()
     form.append('name', payload.name)
     form.append('transcript', payload.transcript)
     form.append('language', payload.language || '')
     form.append('consent', 'true')
+    form.append('preprocess_prompt', String(payload.preprocess_prompt ?? true))
     form.append('audio', payload.audio, payload.filename)
     return requestJson<Job>('/jobs/voices', { method: 'POST', body: form })
   },
@@ -162,6 +201,7 @@ export const api = {
       form.append('language', payload.language || '')
     }
     form.append('consent', 'true')
+    form.append('preprocess_prompt', String(payload.preprocess_prompt ?? true))
     if (payload.audio) {
       form.append('audio', payload.audio, payload.filename || 'sample.wav')
     }

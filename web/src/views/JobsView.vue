@@ -6,6 +6,8 @@ import {
   CheckCircle2,
   Clock3,
   Download,
+  FileAudio2,
+  Layers3,
   Mic2,
   RefreshCw,
   Trash2,
@@ -13,6 +15,7 @@ import {
   XCircle,
 } from '@lucide/vue'
 import AudioButton from '../components/AudioButton.vue'
+import { api } from '../lib/api'
 import { formatDate, formatTime } from '../lib/format'
 import {
   jobAudioUrl,
@@ -41,6 +44,8 @@ const finishedJobs = computed(() =>
 
 function jobIcon(job: Job) {
   if (job.type === 'tts') return AudioLines
+  if (job.type === 'tts_batch') return Layers3
+  if (job.type === 'transcribe') return FileAudio2
   if (job.type === 'voice_preview') return Wand2
   return Mic2
 }
@@ -55,6 +60,7 @@ function jobSubtitle(job: Job): string {
   const parts = [jobTypeLabel(job)]
   const language = job.summary.language_variant || job.summary.language
   if (language) parts.push(String(language))
+  if (job.summary.count) parts.push(`${job.summary.count} items`)
   if (job.summary.format) parts.push(String(job.summary.format).toUpperCase())
   return parts.join(' · ')
 }
@@ -277,7 +283,23 @@ onMounted(() => {
 
           <div v-if="job.error" class="job-error">{{ job.error }}</div>
 
+          <div
+            v-if="job.status === 'completed' && job.type === 'transcribe' && job.result?.text"
+            class="job-transcript"
+          >
+            {{ job.result.text }}
+          </div>
+
           <div class="job-actions">
+            <a
+              v-if="job.status === 'completed' && job.type === 'tts_batch'"
+              :href="api.jobZipUrl(job.id)"
+              class="btn btn-secondary btn-sm"
+              download
+            >
+              <Download :size="13" />
+              Download ZIP
+            </a>
             <template v-if="job.status === 'completed' && job.has_audio">
               <AudioButton :src="jobAudioUrl(job)" label="Play" />
               <a
@@ -291,7 +313,12 @@ onMounted(() => {
             </template>
 
             <RouterLink
-              v-if="job.status === 'completed' && job.type !== 'tts'"
+              v-if="
+                job.status === 'completed' &&
+                ['voice_train', 'voice_retrain', 'voice_preview'].includes(
+                  job.type,
+                )
+              "
               :to="voiceLink(job)"
               class="btn btn-secondary btn-sm"
             >
